@@ -68,33 +68,54 @@ private:
 
 //////////////////////////////////////////////////////////////////////////////
 
-struct VskPhrase {
+struct VskSoundSetting {
     int                                 m_tempo;
     int                                 m_octave;
     int                                 m_length;
     int                                 m_tone;
+
+    VskSoundSetting(int tempo = 120, int octave = 4, int length = 4, int tone = -1) :
+        m_tempo(tempo), m_octave(octave), m_length(length), m_tone(tone)
+    {
+    }
+
+    void reset() {
+        m_tempo = 120;
+        m_octave = 4;
+        m_length = 4;
+        m_tone = -1;
+    }
+};
+
+//////////////////////////////////////////////////////////////////////////////
+
+struct VskPhrase {
+    float                               m_goal;
+    VskSoundSetting                     m_setting;
     std::vector<shared_ptr<VskNote>>    m_notes;
 
-    VskPhrase() : m_tempo(120), m_octave(4), m_length(4), m_tone(-1) { }
+    VskPhrase() : m_goal(0) { }
 
     void add_note(char note) {
         add_note(note, false);
     }
     void add_note(char note, bool dot) {
-        add_note(note, dot, m_length);
+        add_note(note, dot, m_setting.m_length);
     }
     void add_note(char note, bool dot, int length) {
         add_note(note, dot, length, 0);
     }
     void add_note(char note, bool dot, int length, char sign) {
-        add_note(m_tone, note, dot, length, sign);
+        add_note(m_setting.m_tone, note, dot, length, sign);
     }
     void add_note(int tone, char note, bool dot, int length, char sign) {
         m_notes.push_back(
             make_shared<VskNote>(
-                m_tempo, m_octave, tone, note, dot, length, sign)
+                m_setting.m_tempo, m_setting.m_octave,
+                    tone, note, dot, length, sign)
         );
     }
+    void realize(VskSoundPlayer *player);
 }; // struct VskPhrase
 
 //////////////////////////////////////////////////////////////////////////////
@@ -102,7 +123,7 @@ struct VskPhrase {
 struct VskSoundPlayer {
     bool                                m_playing_music;
     PE_event                            m_stopping_event;
-    std::deque<VskPhrase>               m_phrases;
+    std::deque<shared_ptr<VskPhrase>>   m_phrases;
     std::mutex                          m_lock;
     std::vector<shared_ptr<VskNote>>    m_notes;
 
@@ -114,18 +135,12 @@ struct VskSoundPlayer {
         free_beep();
     }
 
-    void add_phrase(const VskPhrase& phrase) {
-        m_lock.lock();
-        m_phrases.push_back(phrase);
-        m_lock.unlock();
-    }
-
-    void play();
+    void play(shared_ptr<VskPhrase> phrase);
     bool wait_for_stop(uint32_t milliseconds = -1);
     void stop();
 
-    bool play_and_wait(uint32_t milliseconds = -1) {
-        play();
+    bool play_and_wait(shared_ptr<VskPhrase> phrase, uint32_t milliseconds = -1) {
+        play(phrase);
         return wait_for_stop(milliseconds);
     }
 
@@ -177,7 +192,6 @@ protected:
     }
 
     void realize_phrase(VskPhrase& phrase);
-    void realize();
     bool wait_for_note(float sec);
 
 protected:
