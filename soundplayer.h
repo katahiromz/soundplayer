@@ -8,6 +8,7 @@
 
 //////////////////////////////////////////////////////////////////////////////
 
+#define ALUT_STATIC
 #include <AL/alut.h>
 
 #if defined(_WIN32) && defined(_MSC_VER)
@@ -15,89 +16,118 @@
     #pragma comment(lib, "alut.lib")
 #endif
 
+#ifdef _WIN32
+    #include "win32_pevent.h"
+#else
+    #include "pevent.h"
+#endif
+
 //////////////////////////////////////////////////////////////////////////////
 
-struct Note {
+struct VskSoundPlayer;
+
+struct VskNote {
     int     m_tempo;
     int     m_octave;
+    int     m_tone;
     char    m_note;
-    int     m_length;
     bool    m_dot;
+    int     m_length;
     char    m_sign;
     float   m_freq;
     float   m_sec;
+    ALuint  m_buffer;
+    ALuint  m_source;
+    float   m_gate;
 
-    Note(int tempo, int octave, char note,
-         int length = 4, bool dot = false, char sign = 0) :
-        m_tempo(tempo), m_octave(octave), m_note(note),
-        m_length(length), m_dot(dot), m_sign(sign)
+    VskNote(int tempo, int octave, int tone, char note,
+            bool dot = false, int length = 4, char sign = 0) :
+        m_tempo(tempo), m_octave(octave), m_tone(tone), m_note(note),
+        m_dot(dot), m_length(length), m_sign(sign)
     {
         m_freq = get_freq(m_octave);
         m_sec = get_sec(m_tempo);
+        m_buffer = -1;
+        m_source = -1;
+        m_gate = 0;
+    }
+
+    ~VskNote() {
+        destroy();
     }
 
     float get_freq(int octave) const;
-    float get_sec(int tempo);
+    float get_sec(int tempo) const;
+
+    void realize(VskSoundPlayer *player);
+    void destroy();
 
 private:
-    Note();
-}; // struct Note
+    VskNote();
+}; // struct VskNote
 
 //////////////////////////////////////////////////////////////////////////////
 
-struct SoundPlayer;
+struct VskPhrase {
+    int                                 m_tempo;
+    int                                 m_octave;
+    int                                 m_length;
+    int                                 m_tone;
+    std::vector<shared_ptr<VskNote>>    m_notes;
 
-struct Phrase {
-    SoundPlayer *           m_player;
-    std::vector<Note>       m_notes;
-    std::vector<ALuint>     m_buffers;
-    std::vector<ALuint>     m_sources;
+    VskPhrase() : m_tempo(120), m_octave(4), m_length(4), m_tone(-1) { }
 
-    Phrase(SoundPlayer *player) : m_player(player) { }
-    ~Phrase() {
+    void add_note(char note) {
+        add_note(note, false);
     }
-
-    void add_note(char note, int length = 4, bool dot = false, char sign = 0);
-    void free() {
-        alDeleteBuffers(int(m_buffers.size()), m_buffers.data());
-        m_buffers.clear();
-
-        alDeleteSources(int(m_sources.size()), m_sources.data());
-        m_sources.clear();
+    void add_note(char note, bool dot) {
+        add_note(note, dot, m_length);
     }
-
-    void realize();
-
-private:
-    Phrase();
-}; // struct Phrase
+    void add_note(char note, bool dot, int length) {
+        add_note(note, dot, length, 0);
+    }
+    void add_note(char note, bool dot, int length, char sign) {
+        add_note(m_tone, note, dot, length, sign);
+    }
+    void add_note(int tone, char note, bool dot, int length, char sign) {
+        m_notes.push_back(
+            make_shared<VskNote>(
+                m_tempo, m_octave, tone, note, dot, length, sign)
+        );
+    }
+}; // struct VskPhrase
 
 //////////////////////////////////////////////////////////////////////////////
 
-struct SoundPlayer {
-    int                 m_tempo;
-    int                 m_octave;
-    int                 m_length;
-    std::deque<Phrase>  m_phrases;
+struct VskSoundPlayer {
+    bool                                m_playing_music;
+    PE_event                            m_stopping_event;
+    std::deque<VskPhrase>               m_phrases;
+    std::mutex                          m_lock;
+    std::vector<shared_ptr<VskNote>>    m_notes;
 
-    SoundPlayer() :
-        m_tempo(120),
-        m_octave(4),
-        m_length(4)
-    {
+    VskSoundPlayer() : m_playing_music(false), m_stopping_event(false, false) {
         init_beep();
     }
 
-    virtual ~SoundPlayer() {
+    virtual ~VskSoundPlayer() {
         free_beep();
     }
 
-    void add_phrase(Phrase& phrase) {
-        phrase.realize();
+    void add_phrase(const VskPhrase& phrase) {
+        m_lock.lock();
         m_phrases.push_back(phrase);
+        m_lock.unlock();
     }
 
     void play();
+    bool wait_for_stop(uint32_t milliseconds = -1);
+    void stop();
+
+    bool play_and_wait(uint32_t milliseconds = -1) {
+        play();
+        return wait_for_stop(milliseconds);
+    }
 
     void beep(int i) {
         switch (i) {
@@ -117,7 +147,8 @@ struct SoundPlayer {
         }
     } // beep
 
-    virtual ALuint create_buffer(float freq, float sec) {
+    virtual ALuint create_buffer(int tone, float freq, float sec) {
+        // TODO: tone
         ALuint buffer = alutCreateBufferWaveform(
             ALUT_WAVEFORM_SINE,
             freq,
@@ -145,10 +176,14 @@ protected:
         alDeleteSources(1, &m_beep_source);
     }
 
+    void realize_phrase(VskPhrase& phrase);
+    void realize();
+    bool wait_for_note(float sec);
+
 protected:
     ALuint  m_beep_buffer;
     ALuint  m_beep_source;
-}; // struct SoundPlayer
+}; // struct VskSoundPlayer
 
 //////////////////////////////////////////////////////////////////////////////
 

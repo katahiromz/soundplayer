@@ -7,7 +7,7 @@
 
 //////////////////////////////////////////////////////////////////////////////
 
-float Note::get_freq(int octave) const {
+float VskNote::get_freq(int octave) const {
     static const char *notes = "C+D+EF+G+A+B";
     const char *ptr = strchr(notes, m_note);
     int i = int(ptr - notes);
@@ -35,9 +35,9 @@ float Note::get_freq(int octave) const {
 
     double freq = 260 * std::pow(2, i / 12.0) * std::pow(2, octave - 4);
     return float(freq);
-} // Note::get_freq
+} // VskNote::get_freq
 
-float Note::get_sec(int tempo) {
+float VskNote::get_sec(int tempo) const {
     float sec;
     assert(tempo != 0);
     if (m_dot) {
@@ -46,66 +46,173 @@ float Note::get_sec(int tempo) {
         sec = float((4 * 60.0) / m_length / tempo);
     }
     return sec;
-} // Note::get_sec
+} // VskNote::get_sec
+
+void VskNote::realize(VskSoundPlayer *player) {
+    destroy();
+    if (m_note != 'R') {
+        m_buffer = player->create_buffer(m_tone, m_freq, m_sec);
+        alGenSources(1, &m_source);
+        alSourcei(m_source, AL_BUFFER, m_buffer);
+    }
+} // VskNote::realize
+
+void VskNote::destroy() {
+    if (m_buffer != -1) {
+        alDeleteBuffers(1, &m_buffer);
+        m_buffer = -1;
+    }
+    if (m_source != -1) {
+        alDeleteSources(1, &m_source);
+        m_source = -1;
+    }
+} // VskNote::destroy
 
 //////////////////////////////////////////////////////////////////////////////
 
-void Phrase::add_note(char note, int length, bool dot, char sign) {
-    m_notes.emplace_back(
-        m_player->m_tempo, m_player->m_octave, note, length, dot, sign);
+void VskSoundPlayer::realize_phrase(VskPhrase& phrase) {
+    float gate = 0;
+    for (auto& note : phrase.m_notes) {
+        note->realize(this);
+        note->m_gate = gate;
+        gate += note->m_sec;
+    }
+} // VskSoundPlayer::realize_phrase
+
+void VskSoundPlayer::realize() {
+    // realize phrases
+    for (auto& phrase : m_phrases) {
+        realize_phrase(phrase);
+    }
+
+    // arrange notes flatly
+    m_notes.clear();
+    for (auto& phrase : m_phrases) {
+        m_notes.insert(m_notes.end(),
+            phrase.m_notes.begin(), phrase.m_notes.end());
+    }
+
+    // sort notes by gates
+    std::sort(m_notes.begin(), m_notes.end(),
+        [this](shared_ptr<VskNote> x, shared_ptr<VskNote> y) {
+            return x->m_gate < y->m_gate;
+        }
+    );
+} // VskSoundPlayer::realize
+
+bool VskSoundPlayer::wait_for_note(float sec) {
+    return m_stopping_event.wait_for_event(uint32_t(sec * 1000));
 }
 
-void Phrase::realize() {
-    free();
+void VskSoundPlayer::play() {
+    realize();
 
-    m_buffers.clear();
-    m_sources.clear();
+    m_playing_music = false;
+    m_stopping_event.pulse();
+    m_playing_music = true;
 
-    for (auto& note : m_notes) {
-        if (note.m_note != 'R') {
-            ALuint buffer = m_player->create_buffer(note.m_freq, note.m_sec);
-            m_buffers.push_back(buffer);
-
-            ALuint source;
-            alGenSources(1, &source);
-            alSourcei(source, AL_BUFFER, buffer);
-            m_sources.push_back(source);
-        } else {
-            m_buffers.push_back(0);
-            m_sources.push_back(0);
-        }
-    }
-} // Phrase::realize
-
-//////////////////////////////////////////////////////////////////////////////
-
-void SoundPlayer::play() {
     std::thread(
         [this](int dummy) {
             for (;;) {
-                if (this->m_phrases.empty()) {
+                // go next phrase
+                m_lock.lock();
+                if (m_phrases.empty()) {
                     break;
                 }
-                auto phrase = this->m_phrases.front();
-                this->m_phrases.pop_front();
-
-                const size_t count = phrase.m_notes.size();
-                assert(count == phrase.m_buffers.size());
-                assert(count == phrase.m_sources.size());
+                auto phrase = m_phrases.front();
+                m_phrases.pop_front();
+                m_lock.unlock();
 
                 float gate = 0;
-                for (size_t i = 0; i < count; ++i) {
-                    auto& note = phrase.m_notes[i];
-                    if (note.m_note != 'R') {
-                        alSourcePlay(phrase.m_sources[i]);
+                for (auto& note : m_notes) {
+                    //std::cout << note->m_gate << std::endl;
+                    if (gate < note->m_gate) {
+                        // wait for next note
+                        if (!wait_for_note(note->m_gate - gate)) {
+                            // stop music if signaled
+                            m_playing_music = false;
+                            break;
+                        }
+                        gate = note->m_gate;
                     }
-                    gate += note.m_sec;
-                    alutSleep(note.m_sec);
+                    if (note->m_note != 'R') {
+                        alSourcePlay(note->m_source);
+                    }
                 }
+                m_playing_music = false;
+                m_stopping_event.pulse();
             }
         },
         0
     ).detach();
-} // SoundPlayer::play
+} // VskSoundPlayer::play
+
+void VskSoundPlayer::stop() {
+    m_playing_music = false;
+    m_stopping_event.pulse();
+}
+
+bool VskSoundPlayer::wait_for_stop(uint32_t milliseconds) {
+    return m_stopping_event.wait_for_event(milliseconds);
+}
+
+//////////////////////////////////////////////////////////////////////////////
+
+#ifdef SOUND_TEST
+    int main(void) {
+        alutInit(NULL, NULL);
+
+        VskPhrase phrase;
+
+        phrase.add_note('C', false, 4);
+        phrase.add_note('D', false, 4);
+        phrase.add_note('E', false, 4);
+        phrase.add_note('F', false, 4);
+        phrase.add_note('E', false, 4);
+        phrase.add_note('D', false, 4);
+        phrase.add_note('C', false, 4);
+        phrase.add_note('R', false, 4);
+
+        phrase.add_note('E', false, 4);
+        phrase.add_note('F', false, 4);
+        phrase.add_note('G', false, 4);
+        phrase.add_note('A', false, 4);
+        phrase.add_note('G', false, 4);
+        phrase.add_note('F', false, 4);
+        phrase.add_note('E', false, 4);
+        phrase.add_note('R', false, 4);
+
+        phrase.add_note('C', false, 4);
+        phrase.add_note('R', false, 4);
+        phrase.add_note('C', false, 4);
+        phrase.add_note('R', false, 4);
+        phrase.add_note('C', false, 4);
+        phrase.add_note('R', false, 4);
+        phrase.add_note('C', false, 4);
+        phrase.add_note('R', false, 4);
+
+        phrase.add_note('C', false, 8);
+        phrase.add_note('C', false, 8);
+        phrase.add_note('D', false, 8);
+        phrase.add_note('D', false, 8);
+        phrase.add_note('E', false, 8);
+        phrase.add_note('E', false, 8);
+        phrase.add_note('F', false, 8);
+        phrase.add_note('F', false, 8);
+
+        phrase.add_note('E', false, 8);
+        phrase.add_note('R', false, 8);
+        phrase.add_note('D', false, 8);
+        phrase.add_note('R', false, 8);
+        phrase.add_note('C', false, 8);
+        phrase.add_note('R', false, 8);
+
+        VskSoundPlayer player;
+        player.add_phrase(phrase);
+        player.play_and_wait();
+
+        alutExit();
+    } // main
+#endif  // def SOUND_TEST
 
 //////////////////////////////////////////////////////////////////////////////
