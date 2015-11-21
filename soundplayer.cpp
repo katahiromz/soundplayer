@@ -58,13 +58,13 @@ void VskNote::realize(VskSoundPlayer *player) {
 } // VskNote::realize
 
 void VskNote::destroy() {
-    if (m_buffer != -1) {
+    if (m_buffer != ALuint(-1)) {
         alDeleteBuffers(1, &m_buffer);
-        m_buffer = -1;
+        m_buffer = ALuint(-1);
     }
-    if (m_source != -1) {
+    if (m_source != ALuint(-1)) {
         alDeleteSources(1, &m_source);
-        m_source = -1;
+        m_source = ALuint(-1);
     }
 } // VskNote::destroy
 
@@ -125,7 +125,7 @@ void VskSoundPlayer::play() {
 
                 float gate = 0;
                 for (auto& note : m_notes) {
-                    //std::cout << note->m_gate << std::endl;
+                    std::cout << note->m_gate << std::endl;
                     if (gate < note->m_gate) {
                         // wait for next note
                         if (!wait_for_note(note->m_gate - gate)) {
